@@ -68,6 +68,9 @@ const POWERUP_FIELD_TTL   = 8;    // s que permanece en pantalla sin recoger
 const TRIPLE_SHOT_TIME    = 5;    // s de duración del efecto
 const TRIPLE_SPREAD       = 0.2;  // rad entre balas del abanico
 
+// ── Power-up: Bomba Nova ─────────────────────────────────────────────────────
+const NOVA_DROP_CHANCE = 0.06; // prob. por asteroide destruido (más escasa que el triple)
+
 class Asteroid {
   constructor(x, y, size = 3) {
     this.x    = x;
@@ -126,9 +129,10 @@ class Asteroid {
 
 // ── Power-up ──────────────────────────────────────────────────────────────────
 class PowerUp {
-  constructor(x, y) {
+  constructor(x, y, type = 'triple') {
     this.x = x;
     this.y = y;
+    this.type = type;
     const angle = rand(0, Math.PI * 2);
     const speed = 40;
     this.vx = Math.cos(angle) * speed;
@@ -149,19 +153,22 @@ class PowerUp {
     // Parpadeo cuando está por desaparecer
     if (this.ttl < 2 && Math.floor(this.ttl * 8) % 2 === 0) return;
 
+    const color = this.type === 'nova' ? '#f0f' : '#0ff';
+    const label = this.type === 'nova' ? 'N' : '3';
+
     ctx.save();
     ctx.translate(this.x, this.y);
-    ctx.strokeStyle = '#0ff';
+    ctx.strokeStyle = color;
     ctx.lineWidth   = 1.5;
     ctx.beginPath();
     ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
     ctx.stroke();
 
-    ctx.fillStyle = '#0ff';
+    ctx.fillStyle = color;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = 'bold 12px monospace';
-    ctx.fillText('3', 0, 1);
+    ctx.fillText(label, 0, 1);
     ctx.restore();
   }
 }
@@ -169,7 +176,8 @@ class PowerUp {
 // ── Ship ──────────────────────────────────────────────────────────────────────
 class Ship {
   constructor() {
-    this.tripleShot = 0; // s restantes de disparo triple; persiste entre niveles
+    this.tripleShot = 0;     // s restantes de disparo triple; persiste entre niveles
+    this.novaBomb   = false; // true si tiene una Bomba Nova guardada; persiste hasta usarla o acabar el nivel
     this.reset();
   }
 
@@ -300,8 +308,10 @@ let ship, bullets, asteroids, particles;
 let score, lives, level;
 let state;      // 'playing' | 'dead' | 'gameover'
 let deadTimer;
-let powerUp;             // instancia de PowerUp en pantalla, o null
-let powerUpSpawnedLevel; // true si ya apareció un power-up en el nivel actual
+let powerUps;            // instancias de PowerUp en pantalla
+let powerUpSpawnedLevel; // true si ya apareció el power-up de disparo triple en el nivel actual
+let novaSpawnedLevel;    // true si ya apareció el power-up de bomba nova en el nivel actual
+let novaFlash;           // s restantes del flash visual de la detonación de la bomba nova
 
 function spawnAsteroids(count) {
   const SAFE_DIST = 130;
@@ -324,8 +334,10 @@ function initGame() {
   lives  = 3;
   level  = 1;
   state  = 'playing';
-  powerUp             = null;
+  powerUps            = [];
   powerUpSpawnedLevel = false;
+  novaSpawnedLevel    = false;
+  novaFlash           = 0;
   spawnAsteroids(4);
 }
 
@@ -333,9 +345,22 @@ function nextLevel() {
   level++;
   bullets   = [];
   particles = [];
+  powerUps  = []; // un power-up no recogido no pasa al siguiente nivel
   ship.reset();
+  ship.novaBomb = false; // la bomba no usada se pierde al acabar el nivel
   powerUpSpawnedLevel = false;
+  novaSpawnedLevel    = false;
   spawnAsteroids(3 + level);
+}
+
+function detonateNova() {
+  for (const a of asteroids) {
+    score += POINTS[a.size];
+    explode(a.x, a.y, a.size * 5);
+  }
+  asteroids = [];
+  ship.novaBomb = false;
+  novaFlash = 0.4;
 }
 
 function explode(x, y, count = 8) {
@@ -369,7 +394,8 @@ function update(dt) {
     particles.forEach(p => p.update(dt));
     particles = particles.filter(p => !p.dead);
     asteroids.forEach(a => a.update(dt));
-    if (powerUp) { powerUp.update(dt); if (powerUp.dead) powerUp = null; }
+    powerUps.forEach(p => p.update(dt));
+    powerUps = powerUps.filter(p => !p.dead);
     if (deadTimer <= 0) { state = 'playing'; ship.reset(); }
     return;
   }
@@ -379,11 +405,19 @@ function update(dt) {
     bullets.push(...ship.tryShoot());
   }
 
+  // Detonar Bomba Nova
+  if (ship.novaBomb && pressed('KeyB')) {
+    detonateNova();
+  }
+
+  if (novaFlash > 0) novaFlash -= dt;
+
   ship.update(dt);
   bullets.forEach(b => b.update(dt));
   asteroids.forEach(a => a.update(dt));
   particles.forEach(p => p.update(dt));
-  if (powerUp) { powerUp.update(dt); if (powerUp.dead) powerUp = null; }
+  powerUps.forEach(p => p.update(dt));
+  powerUps = powerUps.filter(p => !p.dead);
 
   bullets   = bullets.filter(b => !b.dead);
   particles = particles.filter(p => !p.dead);
@@ -401,8 +435,11 @@ function update(dt) {
         newAsteroids.push(...a.split());
         lastKillPos = { x: a.x, y: a.y };
         if (!powerUpSpawnedLevel && Math.random() < POWERUP_DROP_CHANCE) {
-          powerUp = new PowerUp(a.x, a.y);
+          powerUps.push(new PowerUp(a.x, a.y, 'triple'));
           powerUpSpawnedLevel = true;
+        } else if (!novaSpawnedLevel && Math.random() < NOVA_DROP_CHANCE) {
+          powerUps.push(new PowerUp(a.x, a.y, 'nova'));
+          novaSpawnedLevel = true;
         }
       }
     }
@@ -410,19 +447,24 @@ function update(dt) {
   asteroids = asteroids.filter(a => !a.dead).concat(newAsteroids);
   bullets   = bullets.filter(b => !b.dead);
 
-  // Garantía: si el nivel se queda sin asteroides y el power-up no apareció
-  // todavía en este nivel, forzarlo en la posición del último asteroide destruido.
+  // Garantía: si el nivel se queda sin asteroides y el power-up de disparo
+  // triple no apareció todavía en este nivel, forzarlo en la posición del
+  // último asteroide destruido. La bomba nova no tiene esta garantía (ítem escaso).
   if (!powerUpSpawnedLevel && asteroids.length === 0 && lastKillPos) {
-    powerUp = new PowerUp(lastKillPos.x, lastKillPos.y);
+    powerUps.push(new PowerUp(lastKillPos.x, lastKillPos.y, 'triple'));
     powerUpSpawnedLevel = true;
   }
 
   // Nave vs power-up
-  if (powerUp && dist(ship, powerUp) < ship.radius + powerUp.radius) {
-    ship.tripleShot = TRIPLE_SHOT_TIME;
-    explode(powerUp.x, powerUp.y, 10);
-    powerUp = null;
+  for (const p of powerUps) {
+    if (!p.dead && dist(ship, p) < ship.radius + p.radius) {
+      if (p.type === 'nova') ship.novaBomb = true;
+      else ship.tripleShot = TRIPLE_SHOT_TIME;
+      explode(p.x, p.y, 10);
+      p.dead = true;
+    }
   }
+  powerUps = powerUps.filter(p => !p.dead);
 
   // Nave vs asteroide
   if (ship.invincible <= 0) {
@@ -463,9 +505,17 @@ function drawHUD() {
   ctx.textAlign = 'left';
   ctx.fillText(`SCORE  ${score}`, 14, 26);
 
+  let nextLineY = 46;
   if (ship.tripleShot > 0) {
     ctx.fillStyle = '#0ff';
-    ctx.fillText(`TRIPLE ${Math.ceil(ship.tripleShot)}s`, 14, 46);
+    ctx.fillText(`TRIPLE ${Math.ceil(ship.tripleShot)}s`, 14, nextLineY);
+    ctx.fillStyle = '#fff';
+    nextLineY += 20;
+  }
+
+  if (ship.novaBomb) {
+    ctx.fillStyle = '#f0f';
+    ctx.fillText('NOVA [B]', 14, nextLineY);
     ctx.fillStyle = '#fff';
   }
 
@@ -493,9 +543,14 @@ function draw() {
 
   particles.forEach(p => p.draw());
   asteroids.forEach(a => a.draw());
-  if (powerUp) powerUp.draw();
+  powerUps.forEach(p => p.draw());
   bullets.forEach(b => b.draw());
   ship.draw();
+
+  if (novaFlash > 0) {
+    ctx.fillStyle = `rgba(255,0,255,${(novaFlash / 0.4 * 0.5).toFixed(2)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   drawHUD();
 
